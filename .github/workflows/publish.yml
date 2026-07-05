@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   build:
@@ -25,6 +26,11 @@ jobs:
         with:
           token: ${{ secrets.github_token }}
           prefix: "build/${{ github.ref }}"
+
+      - name: Resolve release version
+        run: |
+          VERSION="${GITHUB_REF_NAME#dev/}"
+          echo "RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - name: Build and publish
         run: ./gradlew build publish exportVersion -x test --stacktrace

@@ -26,7 +26,9 @@ group = 'net.fabricmc'
 def baseVersion = '1.16'
 
 def ENV = System.getenv()
-if (ENV.BUILD_NUMBER) {
+if (ENV.RELEASE_VERSION) {
+	version = ENV.RELEASE_VERSION
+} else if (ENV.BUILD_NUMBER) {
 	if (ENV.EXPERIMENTAL) {
 		version = baseVersion + '.0-alpha.' + ENV.BUILD_NUMBER
 	} else {
