@@ -18,6 +18,7 @@
 !/LICENSE
 !/README.md
 !/settings.gradle
+!/CHANGELOG.md
 !/Jenkinsfile
 !/checkstyle.xml
 !/codenarc.groovy
