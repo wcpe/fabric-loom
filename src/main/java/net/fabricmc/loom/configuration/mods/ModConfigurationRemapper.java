@@ -277,13 +277,14 @@ public class ModConfigurationRemapper {
 	}
 
 	// 跨子项目共享的元数据缓存键：jar 路径 + 默认 mixin remap 类型。
-	private record MetadataCacheKey(Path path, ArtifactMetadata.MixinRemapType defaultMixinRemapType) {}
+	private record MetadataCacheKey(Path path, ArtifactMetadata.MixinRemapType defaultMixinRemapType) { }
 
 	/**
-	 * 获取挂在根项目上的跨子项目共享 {@link AsyncCache}。
-	 * <p>
-	 * 缓存随根项目实例生命周期存在（每次构建新建根项目，故不会在 daemon 跨构建泄漏），
-	 * 使同一构建内多个子项目解析同一个 mod jar 的元数据时复用同一个 future。
+	 * Returns the cross-subproject shared {@link AsyncCache} attached to the root project.
+	 *
+	 * <p>The cache lives for the lifetime of the root project instance (a new root project is
+	 * created for each build, so it never leaks across daemon builds), letting multiple
+	 * subprojects resolving the same mod jar reuse the same future.
 	 */
 	private static AsyncCache<ArtifactMetadata> getSharedMetaCache(Project project) {
 		final Project root = project.getRootProject();
