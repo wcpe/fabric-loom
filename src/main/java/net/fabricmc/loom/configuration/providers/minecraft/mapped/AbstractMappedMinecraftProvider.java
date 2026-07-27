@@ -150,7 +150,15 @@ public abstract class AbstractMappedMinecraftProvider<M extends MinecraftProvide
 		return outputJarPath.resolveSibling(outputJarPath.getFileName() + ".backup");
 	}
 
+	protected boolean requiresBackupJars() {
+		return true;
+	}
+
 	protected void createBackupJars(List<MinecraftJar> minecraftJars) throws IOException {
+		if (!requiresBackupJars()) {
+			return;
+		}
+
 		for (MinecraftJar minecraftJar : minecraftJars) {
 			// backup 是「最后产生」的就绪标志，必须原子落位，避免跨进程读到半写的 backup 误判就绪
 			AtomicFiles.copy(minecraftJar.getPath(), getBackupJarPath(minecraftJar));
@@ -245,10 +253,12 @@ public abstract class AbstractMappedMinecraftProvider<M extends MinecraftProvide
 			}
 		}
 
-		for (OutputJar outputJar : outputJars) {
-			if (!Files.exists(getBackupJarPath(outputJar.outputJar()))) {
-				LOGGER.info("Refreshing outputs for mapped jar, as backup jar does not exist for {}", outputJar.outputJar());
-				return true;
+		if (requiresBackupJars()) {
+			for (OutputJar outputJar : outputJars) {
+				if (!Files.exists(getBackupJarPath(outputJar.outputJar()))) {
+					LOGGER.info("Refreshing outputs for mapped jar, as backup jar does not exist for {}", outputJar.outputJar());
+					return true;
+				}
 			}
 		}
 

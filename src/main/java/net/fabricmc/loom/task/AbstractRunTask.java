@@ -43,6 +43,7 @@ import javax.inject.Inject;
 import org.gradle.api.Action;
 import org.gradle.api.Project;
 import org.gradle.api.file.ConfigurableFileCollection;
+import org.gradle.api.file.DirectoryProperty;
 import org.gradle.api.file.FileCollection;
 import org.gradle.api.provider.ListProperty;
 import org.gradle.api.provider.MapProperty;
@@ -51,9 +52,12 @@ import org.gradle.api.provider.ProviderFactory;
 import org.gradle.api.specs.Spec;
 import org.gradle.api.tasks.Classpath;
 import org.gradle.api.tasks.Input;
+import org.gradle.api.tasks.InputFiles;
 import org.gradle.api.tasks.JavaExec;
 import org.gradle.api.tasks.Nested;
 import org.gradle.api.tasks.Optional;
+import org.gradle.api.tasks.PathSensitive;
+import org.gradle.api.tasks.PathSensitivity;
 import org.gradle.process.CommandLineArgumentProvider;
 import org.gradle.process.ExecOperations;
 import org.gradle.work.DisableCachingByDefault;
@@ -61,11 +65,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import net.fabricmc.loom.LoomGradleExtension;
-import net.fabricmc.loom.configuration.ide.RunConfig;
+import net.fabricmc.loom.api.RunConfiguration;
+import net.fabricmc.loom.configuration.ide.RunConfigUtils;
+import net.fabricmc.loom.configuration.ide.RuntimeLibraries;
 import net.fabricmc.loom.task.prod.TracyCapture;
 import net.fabricmc.loom.util.Constants;
 import net.fabricmc.loom.util.Platform;
 import net.fabricmc.loom.util.XVFBExistsValueSource;
+import net.fabricmc.loom.util.gradle.SourceSetHelper;
 
 @DisableCachingByDefault
 public abstract class AbstractRunTask extends JavaExec {
@@ -77,8 +84,10 @@ public abstract class AbstractRunTask extends JavaExec {
 	@Inject
 	protected abstract ProviderFactory getProviders();
 
-	@Input
-	protected abstract Property<String> getInternalRunDir();
+	// TODO maybe revert back to a string
+	@InputFiles
+	@PathSensitive(PathSensitivity.NONE)
+	protected abstract DirectoryProperty getInternalRunDir();
 	@Input
 	protected abstract MapProperty<String, Object> getInternalEnvironmentVars();
 	@Input
@@ -116,23 +125,27 @@ public abstract class AbstractRunTask extends JavaExec {
 	@Classpath
 	protected abstract ConfigurableFileCollection getInternalClasspath();
 
-	public AbstractRunTask(Function<Project, RunConfig> configProvider) {
+	public AbstractRunTask(Function<Project, RunConfiguration> configProvider) {
 		super();
 		setGroup(Constants.TaskGroup.FABRIC);
 
-		// 配置期立即物化 RunConfig，提取纯数据快照，断开对 Project/RunConfigSettings/SourceSet 的延迟引用，
-		// 使本任务可被配置缓存序列化（原实现用 provider 延迟持有 settings→Project，CC 不可序列化）。
-		final RunConfig runConfig = configProvider.apply(getProject());
-		final List<String> programArgsSnapshot = List.copyOf(runConfig.programArgs);
-		final String mainClassSnapshot = runConfig.mainClass;
-		final String runDirSnapshot = runConfig.runDir;
-		final Map<String, Object> envVarsSnapshot = Map.copyOf(runConfig.environmentVariables);
-		final String environmentSnapshot = runConfig.environment;
-		final List<String> excludedLibraryPathsSnapshot = runConfig.getExcludedLibraryPaths(getProject());
-		final String configNameSnapshot = runConfig.configName;
+		// 配置期立即物化最终 RunConfiguration，并仅保留纯值快照，避免配置缓存序列化
+		// 延迟 Provider 对 Project 或运行配置对象的引用。
+		final RunConfiguration runConfig = configProvider.apply(getProject());
+		final List<String> programArgsSnapshot = List.copyOf(runConfig.getProgramArguments().get());
+		final String mainClassSnapshot = runConfig.getDevLaunchMainClass().get();
+		final File runDirSnapshot = runConfig.getRunDirectory().getAsFile().get();
+		final Map<String, Object> envVarsSnapshot = Map.copyOf(runConfig.getEnvironmentVars().get());
+		final List<String> jvmArgsSnapshot = List.copyOf(runConfig.getJvmArguments().get());
+		final String environmentSnapshot = runConfig.getRuntimeEnvironment().get();
+		final List<String> excludedLibraryPathsSnapshot = RuntimeLibraries.getExcludedLibraryPaths(getProject(), runConfig);
+		final String configNameSnapshot = RunConfigUtils.getDisplayName(runConfig, getProject());
 
-		getInternalClasspath().from(runConfig.sourceSet.getRuntimeClasspath()
-				.filter(new LibraryFilter(excludedLibraryPathsSnapshot, configNameSnapshot)));
+		getInternalClasspath().from(SourceSetHelper.getSourceSetByName(runConfig.getSourceSet().get(), getProject()).getRuntimeClasspath()
+				.filter(new LibraryFilter(
+						excludedLibraryPathsSnapshot,
+						configNameSnapshot)
+				));
 
 		getArgumentProviders().add(new CommandLineArgumentProvider() {
 			@Override
@@ -151,11 +164,11 @@ public abstract class AbstractRunTask extends JavaExec {
 			}
 		});
 		getMainClass().set(mainClassSnapshot);
-		getJvmArguments().addAll(getProviders().provider(this::getGameJvmArgs));
+		getJvmArgumentProviders().add(this::getGameJvmArgs);
 
-		getInternalRunDir().set(runDirSnapshot);
+		getInternalRunDir().fileValue(runDirSnapshot);
 		getInternalEnvironmentVars().set(envVarsSnapshot);
-		getInternalJvmArgs().set(List.copyOf(runConfig.vmArgs));
+		getInternalJvmArgs().set(jvmArgsSnapshot);
 		getUseArgFile().set(getProject().provider(this::canUseArgFile));
 		getProjectDir().set(getProject().getProjectDir().getAbsolutePath());
 		getGradleUserHomeDir().set(getProject().getGradle().getGradleUserHomeDir().getAbsolutePath());
@@ -203,8 +216,20 @@ public abstract class AbstractRunTask extends JavaExec {
 			super.setClasspath(getInternalClasspath());
 		}
 
-		setWorkingDir(new File(getProjectDir().get(), getInternalRunDir().get()));
+		setWorkingDir(getInternalRunDir());
 		environment(getInternalEnvironmentVars().get());
+
+		Path runDirectory = getInternalRunDir().getAsFile().get().toPath();
+
+		if (!Files.exists(runDirectory)) {
+			try {
+				Files.createDirectories(runDirectory);
+			} catch (IOException e) {
+				throw new UncheckedIOException("Failed to create run directory " + runDirectory, e);
+			}
+		} else if (!Files.isDirectory(runDirectory)) {
+			LOGGER.warn("Run directory {} is not a directory", runDirectory);
+		}
 
 		// Wrap with Tracy if enabled
 		if (getTracyCapture().isPresent()) {
@@ -238,7 +263,7 @@ public abstract class AbstractRunTask extends JavaExec {
 		commandLine.add(XVFBExistsValueSource.XVFB);
 		commandLine.add("--auto-servernum");
 		commandLine.add(javaExec);
-		commandLine.addAll(getJvmArguments().get());
+		commandLine.addAll(getAllJvmArgs());
 		commandLine.add(getMainClass().get());
 		commandLine.addAll(getArgs());
 
